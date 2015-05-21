@@ -170,8 +170,6 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 	public void setAverageWaitingTime(double averageWaitingTime) {
 		this.averageWaitingTime = averageWaitingTime;
 	}
-
-	
 	
 	public Queue<ResCloudlet> getCloudletWaitingQueue() {
 		return cloudletWaitingQueue;
