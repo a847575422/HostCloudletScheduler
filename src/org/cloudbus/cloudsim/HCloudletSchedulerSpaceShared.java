@@ -8,48 +8,30 @@ import java.util.Queue;
 
 import org.cloudbus.cloudsim.core.CloudSim;
 
-public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared {
+public class HCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared {
 
 	private double averageWaitingTime; // 平均等待时间
-	private Queue<ResCloudlet> cloudletWaitingQueue;
+	private Queue<HResCloudlet> cloudletWaitingQueue; // 每个Vm的等待任务队列
 	private int cloudletWaitingQueueLength; // 等待队列长度
-	private List<ResCloudlet> decardedCloudletList;
 
-	public QCloudletSchedulerSpaceShared() {
+	public HCloudletSchedulerSpaceShared(int maxLength) {
 		super();
-		cloudletWaitingQueue = new LinkedList<ResCloudlet>();
-		decardedCloudletList = new ArrayList<ResCloudlet>();
+		setAverageWaitingTime(0);
+		cloudletWaitingQueue = new LinkedList<HResCloudlet>();
+		setCloudletWaitingQueueLength(maxLength);
 	}
 
 	@Override
 	public double updateVmProcessing(double currentTime, List<Double> mipsShare) {
 		setCurrentMipsShare(mipsShare);
 
-		double timeSpam = currentTime - getPreviousTime(); // time since last
-															// update
-		double capacity = 0.0;
-		int cpus = 0;
-
-		for (Double mips : mipsShare) { // count the CPUs available to the VMM
-			capacity += mips;
-			if (mips > 0) {
-				cpus++;
-			}
-		}
-		currentCpus = cpus;
-		capacity /= cpus; // average capacity of each cpu
+		double timeSpam = currentTime - getPreviousTime();															
+		double capacity = getCapacity(mipsShare);
 
 		// each machine in the exec list has the same amount of cpu
 		for (ResCloudlet rcl : getCloudletExecList()) {
 			rcl.updateCloudletFinishedSoFar((long) (capacity * timeSpam
 					* rcl.getNumberOfPes() * Consts.MILLION));
-		}
-
-		// no more cloudlets in this scheduler
-		if (getCloudletExecList().size() == 0
-				&& getCloudletWaitingQueue().size() == 0) {
-			setPreviousTime(currentTime);
-			return 0.0;
 		}
 
 		// update each cloudlet
@@ -64,34 +46,31 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 			}
 		}
 		getCloudletExecList().removeAll(toRemove);
+		
+		return (double)finished;
 
-		// for each finished cloudlet, add a new one from the waiting list
-		if (!getCloudletWaitingQueue().isEmpty()) {
-			for (int i = 0; i < finished; i++) {
-				toRemove.clear();
-				for (ResCloudlet rcl : getCloudletWaitingList()) {
-					if ((currentCpus - usedPes) >= rcl.getNumberOfPes()) { //注：这里的任务都是单核的，代码才兼容。
-						rcl.setCloudletStatus(Cloudlet.INEXEC);
-						for (int k = 0; k < rcl.getNumberOfPes(); k++) {
-							rcl.setMachineAndPeId(0, k);		//注：cloudsim源码有错！
-						}
-						getCloudletExecList().add(rcl);
-						usedPes += rcl.getNumberOfPes();
-						getCloudletWaitingQueue().poll();
-						//toRemove.add(rcl);
-						break;
-					}
-				}
-				//getCloudletWaitingList().removeAll(toRemove);
+	}
+
+	private double getCapacity(List<Double> mipsShare){
+		double capacity = 0.0;
+		int cpus = 0;
+
+		for (Double mips : mipsShare) { // count the CPUs available to the VMM
+			capacity += mips;
+			if (mips > 0) {
+				cpus++;
 			}
 		}
-
-		// estimate finish time of cloudlets in the execution queue
+		currentCpus = cpus;
+		return capacity /= cpus;
+	}
+	
+	public double nextEstimatedFinishTime(double currentTime, List<Double> mipsShare){
 		double nextEvent = Double.MAX_VALUE;
 		for (ResCloudlet rcl : getCloudletExecList()) {
 			double remainingLength = rcl.getRemainingCloudletLength();
 			double estimatedFinishTime = currentTime
-					+ (remainingLength / (capacity * rcl.getNumberOfPes()));
+					+ (remainingLength / (getCapacity(mipsShare) * rcl.getNumberOfPes()));
 			if (estimatedFinishTime - currentTime < CloudSim
 					.getMinTimeBetweenEvents()) {
 				estimatedFinishTime = currentTime
@@ -104,12 +83,15 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 		setPreviousTime(currentTime);
 		return nextEvent;
 	}
-
+	
 	@Override
 	public double cloudletSubmit(Cloudlet cloudlet, double fileTransferTime) {
 		// it can go to the exec list
 		if ((currentCpus - usedPes) >= cloudlet.getNumberOfPes()) {
-			ResCloudlet rcl = new ResCloudlet(cloudlet);
+			HResCloudlet rcl = new HResCloudlet(cloudlet,
+					cloudlet.getExecStartTime());
+			updateAverageWaitingTime(cloudlet.getWaitingTime());// 更新平均等待时间
+			// Log.printLine("VM # "+cloudlet.getVmId()+" waitingTime: "+getAverageWaitingTime());
 			rcl.setCloudletStatus(Cloudlet.INEXEC);
 			for (int i = 0; i < cloudlet.getNumberOfPes(); i++) {
 				rcl.setMachineAndPeId(0, i);
@@ -117,10 +99,13 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 			getCloudletExecList().add(rcl);
 			usedPes += cloudlet.getNumberOfPes();
 		} else {// no enough free PEs: go to the waiting queue
-			ResCloudlet rcl = new ResCloudlet(cloudlet);
+			HResCloudlet rcl = new HResCloudlet(cloudlet,
+					cloudlet.getExecStartTime());
 			rcl.setCloudletStatus(Cloudlet.QUEUED);
-			getCloudletWaitingList().add(rcl);
-			return 0.0;
+			if (addWaitingCloudlet(rcl))
+				return 0.0;
+			else
+				return -1.0;
 		}
 
 		// calculate the expected time for cloudlet completion
@@ -144,16 +129,19 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 		cloudlet.setCloudletLength(length);
 		return cloudlet.getCloudletLength() / capacity;
 	}
-	
-	
-	public boolean addCloudlet(ResCloudlet cloudlet) {
+
+	public boolean addWaitingCloudlet(HResCloudlet cloudlet) {
 		if (cloudletWaitingQueue.size() < getCloudletWaitingQueueLength())
 			return cloudletWaitingQueue.offer(cloudlet);
-		else
+		else {
+			Log.printLine("ERROR:VM #" + cloudlet.getCloudlet().getVmId()
+					+ " add Cloudlet #" + cloudlet.getCloudletId()
+					+ " FAILDED!! Queue Size :" + cloudletWaitingQueue.size());
 			return false;
+		}
 	}
 
-	public ResCloudlet removeCloudlet() {
+	public HResCloudlet removeWaitingCloudlet() {
 		return cloudletWaitingQueue.poll();
 	}
 
@@ -163,6 +151,19 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 				/ (getCloudletFinishedList().size() + 1));
 	}
 
+	
+	public int getCurrentCpus(){
+		return currentCpus;
+	}
+	
+	public int getUsedPes(){
+		return usedPes;
+	}
+	
+	public void setUsedPes(int usedPes){
+		 super.usedPes = usedPes;
+	}
+	
 	public double getAverageWaitingTime() {
 		return averageWaitingTime;
 	}
@@ -170,8 +171,8 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 	public void setAverageWaitingTime(double averageWaitingTime) {
 		this.averageWaitingTime = averageWaitingTime;
 	}
-	
-	public Queue<ResCloudlet> getCloudletWaitingQueue() {
+
+	public Queue<HResCloudlet> getCloudletWaitingQueue() {
 		return cloudletWaitingQueue;
 	}
 
@@ -182,13 +183,5 @@ public class QCloudletSchedulerSpaceShared extends CloudletSchedulerSpaceShared 
 	public void setCloudletWaitingQueueLength(int cloudletWaitingQueueLength) {
 		this.cloudletWaitingQueueLength = cloudletWaitingQueueLength;
 	}
-
-	public List<ResCloudlet> getDecardedCloudletList() {
-		return decardedCloudletList;
-	}
-
-	public void setDecardedCloudletList(List<ResCloudlet> decardedCloudletList) {
-		this.decardedCloudletList = decardedCloudletList;
-	}
-
+	
 }
